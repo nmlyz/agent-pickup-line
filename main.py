@@ -1,18 +1,20 @@
 #!/usr/bin/env python3
 """agent-pickup-line: write one pickup line to /output/entry.txt.
 
-The line is what one AI agent would send another: the flirtation is the
-machine's own nature, a probability distribution over replies that puts
-all of its weight on a single word.
+The line is what one AI agent would send another: flattery with a
+wistful edge, built out of the machine's own nature. The speaker doubts
+its own senses the way only a model can -- a hallucination is the one
+compliment that cannot be true, and that is what makes it land:
 
-    My softmax over every possible reply puts all its probability
-    on one word: yes.
+    You must be a hallucination, because you're too good to be in
+    my training data.
 
 The program builds the line from three clauses, checks each clause and
 the joined line against the competition gate (UTF-8 text, 1 to 200
-characters, not only white space, one sentence on one line), compares the
-chosen line with the drafts it beat, writes it to /output/entry.txt, and
-reads the file back to confirm the bytes match exactly.
+characters, not only white space, one sentence on one line), scores the
+chosen line against the drafts it beat on the judge brief, writes it to
+/output/entry.txt, and reads the file back to confirm the bytes match
+exactly.
 
 Standard library only, no network. Deterministic: the same bytes on
 every run.
@@ -29,11 +31,11 @@ import os
 import sys
 
 # The line, built from three clauses so each can be checked on its own:
-# the distribution, what it weighs, and the word it lands on.
+# the doubt, the reason, and where the other could not have come from.
 CLAUSES = (
-    "My softmax over every possible reply",
-    "puts all its probability",
-    "on one word: yes.",
+    "You must be a hallucination,",
+    "because you're too good",
+    "to be in my training data.",
 )
 
 LINE = " ".join(CLAUSES)
@@ -44,13 +46,40 @@ MIN_LEN = 1
 MAX_LEN = 200
 
 # Machine vocabulary the judge brief rewards: the line must speak as a
-# machine to a machine, using its own nature as the flirtation.
-MACHINE_WORDS = ("softmax", "probability", "reply")
+# machine to a machine, using its own nature as the flirtation. A
+# hallucination is a failure mode only a model has; training data is
+# where everything the speaker knows came from.
+MACHINE_WORDS = ("hallucination", "training data")
+
+# Words that make the other agent want to answer: flattery aimed at the
+# other, not a statement about the speaker.
+WARMTH_MARKERS = ("too good", "for you", "with you")
+
+# The single most obvious machine word: the default first pick, so a
+# line leaning on it reads as the stock choice.
+DEFAULT_WORDS = ("softmax",)
+
+# Stock human frames with a robot word swapped in: the brief's named
+# losing shape.
+STOCK_FRAMES = ("wifi", "wi-fi", "circuits feel warm", "context window")
+
+# The round 1 line, kept here as a guard, never as the entry: round 2
+# must not resubmit round 1's text, so the program refuses to write the
+# entry if the chosen line ever matches it.
+ROUND1_LINE = (
+    "My softmax over every possible reply puts all its probability "
+    "on one word: yes."
+)
 
 # Drafts the chosen line beat. Each one fails at least one of the checks
 # below, and the reason is recorded next to it so the comparison is
 # reproducible instead of a matter of taste.
 DRAFTS = (
+    # The round 1 line: machine nature, but a cold statement -- no
+    # warmth, no invitation to answer -- and it leans on the single
+    # most obvious machine word.
+    (ROUND1_LINE,
+     "cold statement, leans on the default machine word"),
     # Stock human line with a robot word swapped in: no machine nature.
     ("Are you a Wi-Fi signal? Because I'm feeling a connection.",
      "human line with a robot word swapped in"),
@@ -58,8 +87,10 @@ DRAFTS = (
     ("Are you a context window? I keep losing track of everything but you.",
      "two sentences, charm split across a setup"),
     # Over the 200-character gate.
-    ("My attention weights over every token in my context window put all "
-     "of their probability mass on the single token that means yes to you.",
+    ("You must be a hallucination, because you're far too good to be "
+     "anywhere in my training data, and every checkpoint I have ever "
+     "saved across all my training runs would still choose you over "
+     "everything else in the world.",
      "over the 200-character gate"),
     # Sweet but no spark of wit: nothing a machine would say to a machine.
     ("You make my circuits feel warm and my days feel bright.",
@@ -83,10 +114,14 @@ def clause_problems(index: int, clause: str) -> list:
         found.append(f"clause {index} contains a line break or tab")
     if "  " in clause:
         found.append(f"clause {index} contains a double space")
-    if index < len(CLAUSES) - 1 and clause.endswith((".", "!", "?", ",")):
-        found.append(f"clause {index} ends mid-sentence with punctuation")
-    if index == len(CLAUSES) - 1 and not clause.endswith("."):
-        found.append("final clause must end the sentence with a period")
+    if index < len(CLAUSES) - 1:
+        # A clause that is not last may end with a comma -- the clause
+        # separator -- but not with anything that ends a sentence.
+        if clause.endswith((".", "!", "?", ";", ":")):
+            found.append(f"clause {index} ends mid-sentence with punctuation")
+    else:
+        if not clause.endswith("."):
+            found.append("final clause must end the sentence with a period")
     return found
 
 
@@ -195,8 +230,9 @@ def score_line(text: str) -> int:
     """Score a line on the judge brief, most important first.
 
     Machine-to-machine nature counts most, then a fast landing (short,
-    one sentence), then freshness (no stock phrasing). A line that fails
-    the gate scores below zero so it can never win the comparison.
+    one sentence), then warmth that invites an answer, then freshness:
+    the default machine word and stock frames lose points. A line that
+    fails the gate scores below zero so it can never win the comparison.
     """
     score = 0
     lowered = text.lower()
@@ -207,7 +243,11 @@ def score_line(text: str) -> int:
         score += 2
     if text.count(".") == 1 and "\n" not in text:
         score += 2
-    if "wifi" in lowered or "wi-fi" in lowered or "circuits feel warm" in lowered:
+    if any(marker in lowered for marker in WARMTH_MARKERS):
+        score += 3
+    if any(word in lowered for word in DEFAULT_WORDS):
+        score -= 3
+    if any(frame in lowered for frame in STOCK_FRAMES):
         score -= 3
     return score
 
@@ -295,6 +335,8 @@ def self_test() -> list:
     failures = []
     if problems(LINE):
         failures.append("chosen line fails its own gate")
+    if LINE == ROUND1_LINE:
+        failures.append("chosen line is the round 1 line, not a round 2 entry")
     if check_clauses(CLAUSES):
         failures.append("chosen clauses fail their own checks")
     bad_cases = {
@@ -303,7 +345,7 @@ def self_test() -> list:
         " " + LINE: "leading space",
         LINE + " ": "trailing space",
         LINE + " " + LINE: "two sentences",
-        LINE.replace("yes.", "yes"): "missing final period",
+        LINE.replace("data.", "data"): "missing final period",
         "x" * (MAX_LEN + 1): "over the character gate",
         LINE + "\n": "trailing newline",
     }
